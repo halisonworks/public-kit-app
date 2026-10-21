@@ -19,8 +19,12 @@
 </head>
 <body>
   <div id="msg">Loading shared canvas…</div>
-  <iframe id="frame" title="Shared canvas"></iframe>
-  <a id="footer" href="https://github.com/halisonworks/public-kit-app" target="_blank" rel="noopener">Made with KIT Apps</a>
+  <!-- Sandboxed like the Studio canvas frame: shared code gets an opaque origin.
+       Like the Studio shell, this page holds the canvas's data and serves it to
+       the frame (see CanvasIframe.jsx / appData.js), keyed by a hash of the
+       link: the same link gets its data back, two links never share it. -->
+  <iframe id="frame" title="Shared canvas" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads"></iframe>
+  <a id="footer" href="https://github.com/halisonworks/public-kit-app" target="_blank" rel="noopener">Made with KIT Apps by Halison.io</a>
   <script>
     (function () {
       function fromB64Url(s) {
@@ -34,6 +38,12 @@
           var raw = (frag || '').replace(/^#/, '');
           if (!raw) return null;
           var o = JSON.parse(fromB64Url(raw));
+          // v2 links carry a project (files + entry). The paths only name modules
+          // inside the sandboxed frame; nothing is written anywhere.
+          if (o && o.files && typeof o.files === 'object' && typeof o.files[o.entry] === 'string') {
+            o.code = o.files[o.entry];
+            return o;
+          }
           if (!o || typeof o.code !== 'string') return null;
           return o;
         } catch (e) { return null; }
@@ -48,6 +58,66 @@
         return 'component';
       }
 
+      // Mirror of shareStorageId in src/utils/shareLink.js.
+      function storageIdOf(text) {
+        return crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text))).then(function (h) {
+          return 'share-' + Array.from(new Uint8Array(h).slice(0, 12), function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+        });
+      }
+
+      // The canvas's localStorage under __cv__:<id>: and its appStudio.storage
+      // in IndexedDB appstudio:<id>, same layout as the Studio shell.
+      function readLocal(prefix) {
+        var out = {};
+        try {
+          for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (k && k.indexOf(prefix) === 0) out[k.slice(prefix.length)] = localStorage.getItem(k);
+          }
+        } catch (e) { /* storage blocked: start empty */ }
+        return out;
+      }
+      function writeLocal(prefix, d) {
+        if (d.op === 'ls-set') localStorage.setItem(prefix + d.key, String(d.value));
+        else if (d.op === 'ls-remove') localStorage.removeItem(prefix + d.key);
+        else if (d.op === 'ls-clear') Object.keys(readLocal(prefix)).forEach(function (k) { localStorage.removeItem(prefix + k); });
+      }
+      var dbPromise = null;
+      function idb(name, method, args) {
+        if (!dbPromise) {
+          dbPromise = new Promise(function (resolve, reject) {
+            var req = indexedDB.open(name, 1);
+            req.onupgradeneeded = function () { req.result.createObjectStore('kv'); };
+            req.onsuccess = function () { resolve(req.result); };
+            req.onerror = function () { reject(req.error); };
+          });
+        }
+        return dbPromise.then(function (db) {
+          return new Promise(function (resolve, reject) {
+            var write = method === 'set' || method === 'remove' || method === 'clear';
+            var t = db.transaction('kv', write ? 'readwrite' : 'readonly');
+            var s = t.objectStore('kv');
+            var a = args || [];
+            var r, k2;
+            if (method === 'get') r = s.get(a[0]);
+            else if (method === 'set') r = s.put(a[1], a[0]);
+            else if (method === 'remove') r = s.delete(a[0]);
+            else if (method === 'keys') r = s.getAllKeys();
+            else if (method === 'values') r = s.getAll();
+            else if (method === 'clear') r = s.clear();
+            else if (method === 'getAll') { k2 = s.getAllKeys(); r = s.getAll(); }
+            else return reject(new Error('Unknown storage method "' + method + '".'));
+            t.oncomplete = function () {
+              if (write) return resolve(true);
+              if (k2) { var o = {}; k2.result.forEach(function (k, i) { o[k] = r.result[i]; }); return resolve(o); }
+              resolve(r.result);
+            };
+            t.onerror = function () { reject(t.error); };
+            t.onabort = function () { reject(t.error || new Error('The storage write was aborted (storage may be full).')); };
+          });
+        });
+      }
+
       var data = decode(location.hash);
       var msg = document.getElementById('msg');
       var frame = document.getElementById('frame');
@@ -57,16 +127,28 @@
       }
       document.title = (data.name ? data.name.replace(/\.[^.]+$/, '') : 'Shared canvas') + ' · KIT Apps';
 
-      window.addEventListener('message', function (ev) {
-        if (ev.source !== frame.contentWindow) return;
-        if (ev.data && ev.data.type === 'ready') {
-          frame.contentWindow.postMessage({ type: 'render', code: data.code, kind: kindOf(data.code) }, '*');
-          msg.style.display = 'none';
-          frame.style.display = 'block';
-        }
+      storageIdOf(location.hash).then(function (id) {
+        var prefix = '__cv__:' + id + ':';
+        window.addEventListener('message', function (ev) {
+          if (ev.source !== frame.contentWindow) return;
+          var d = ev.data;
+          if (!d || typeof d !== 'object') return;
+          if (d.type === 'ready') {
+            frame.contentWindow.postMessage({ type: 'render', code: data.code, files: data.files, entry: data.entry, kind: kindOf(data.code), storage: readLocal(prefix) }, '*');
+            msg.style.display = 'none';
+            frame.style.display = 'block';
+          } else if (d.type === 'storage' && d.op === 'idb') {
+            idb('appstudio:' + id, d.method, d.args).then(
+              function (result) { frame.contentWindow.postMessage({ type: 'storage-result', id: d.id, result: result }, '*'); },
+              function (err) { frame.contentWindow.postMessage({ type: 'storage-result', id: d.id, error: (err && err.message) || String(err) }, '*'); }
+            );
+          } else if (d.type === 'storage') {
+            try { writeLocal(prefix, d); } catch (e) { /* quota full: the write is lost, as in a full browser store */ }
+          }
+        });
+        // canvas-runtime is a sibling folder under the web root.
+        frame.src = '../canvas-runtime/index.html';
       });
-      // canvas-runtime is a sibling folder under the web root.
-      frame.src = '../canvas-runtime/index.html';
     })();
   </script>
 </body>
