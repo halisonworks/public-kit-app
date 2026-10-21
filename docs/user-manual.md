@@ -36,7 +36,7 @@ What it is *not*: a code editor, a debugger, or a project scaffolder. There's no
 
 ## 2. Installing
 
-1. Download the latest installer from [GitHub releases](https://github.com/halisonworks/public-kit-app/releases). Look for `KIT Apps_<version>_x64-setup.exe` (NSIS) or `KIT Apps_<version>_x64_en-US.msi`.
+1. Download the latest installer from [the KIT Apps releases](https://github.com/halisonworks/halison-software/releases). Look for `KIT.Apps_<version>_x64-setup.exe` (recommended, no admin needed) or `KIT.Apps_<version>_x64_en-US.msi`.
 2. Double-click. SmartScreen may warn the build isn't code-signed — click **More info** → **Run anyway**.
 3. Installs to `%LOCALAPPDATA%\KIT Apps\` (no admin required).
 4. Launch from the Start menu (search "KIT Apps").
